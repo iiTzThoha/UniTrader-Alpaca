@@ -4,5 +4,5 @@ plotly==5.24.1
 yfinance==0.2.37
 pandas==2.2.2
 python-dotenv==1.0.1
-supabase-py==0.3.8
+supabase==2.10.0
 httpx==0.27.0
