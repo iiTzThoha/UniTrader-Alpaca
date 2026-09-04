@@ -31,28 +31,6 @@ UniTrader is an autonomous AI trading agent that combines LLM-powered decision m
 - AI/ML API (LLM Access)
 - yfinance (Market Data)
 - Plotly (Charts)
-- WSL Ubuntu 20.04 (Environment)
-
-
-## Architecture
-
-UniTrader Architecture
-
-Market Data -> Proposer (LLM) -> Critic (LLM)
-                   |                  |
-                   v                  v
-             Trade Idea          Risk Score
-                   |                  |
-                   +--------+---------+
-                            |
-                            v
-                     Circuit Breaker
-                            |
-                            v
-                     Execute Order (Alpaca)
-                            |
-                            v
-                     Decision Journal (Supabase)
 
 
 ## Dashboard Sections
@@ -81,30 +59,6 @@ Market Data -> Proposer (LLM) -> Critic (LLM)
    - Independent LLM review of every trade
    - Risk scoring (0-1 scale)
    - Rejection with rationale
-
-
-## Project Structure
-
-alpaca-hackathon/
-├── dashboard/
-│   └── app.py
-├── agents/
-│   ├── proposer.py
-│   └── critic.py
-├── core/
-│   ├── circuit_breaker.py
-│   ├── journal.py
-│   └── alpaca_client.py
-├── execution/
-│   ├── executor.py
-│   └── closer.py
-├── persistence/
-│   └── supabase_client.py
-├── signals/
-│   ├── engine.py
-│   └── universe.py
-└── config/
-    └── settings.py
 
 
 ## Running Locally
