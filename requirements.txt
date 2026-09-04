@@ -1,7 +1,8 @@
-streamlit
-streamlit-autorefresh
-plotly
-yfinance
-pandas
-python-dotenv
-supabase-py
+streamlit==1.38.0
+streamlit-autorefresh==0.3.1
+plotly==5.24.1
+yfinance==0.2.37
+pandas==2.2.2
+python-dotenv==1.0.1
+supabase-py==0.3.8
+httpx==0.27.0
