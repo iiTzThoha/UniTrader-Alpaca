@@ -10,6 +10,28 @@ Built for the Alpaca AI Trading Agents Hackathon 2026 (lablab.ai)
 UniTrader is an autonomous AI trading agent that combines LLM-powered decision making with robust risk controls. It uses a Proposer-Critic architecture where one LLM generates trade ideas and another LLM evaluates them for risk, creating a built-in governance layer.
 
 
+## Architecture
+
+UniTrader Architecture
+
+Market Data
+    |
+    v
+Proposer (LLM) -----> Trade Idea
+    |
+    v
+Critic (LLM) -------> Risk Score
+    |
+    v
+Circuit Breaker
+    |
+    v
+Execute Order (Alpaca)
+    |
+    v
+Decision Journal (Supabase)
+
+
 ## Key Features
 
 - Autonomous Trading - AI scans symbols and generates trade proposals without human intervention
@@ -31,6 +53,36 @@ UniTrader is an autonomous AI trading agent that combines LLM-powered decision m
 - AI/ML API (LLM Access)
 - yfinance (Market Data)
 - Plotly (Charts)
+- WSL Ubuntu 20.04
+
+
+## Project Structure
+
+dashboard/
+  app.py
+
+agents/
+  proposer.py
+  critic.py
+
+core/
+  circuit_breaker.py
+  journal.py
+  alpaca_client.py
+
+execution/
+  executor.py
+  closer.py
+
+persistence/
+  supabase_client.py
+
+signals/
+  engine.py
+  universe.py
+
+config/
+  settings.py
 
 
 ## Dashboard Sections
