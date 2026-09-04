@@ -12,8 +12,7 @@ UniTrader is an autonomous AI trading agent that combines LLM-powered decision m
 
 ## Architecture
 
-UniTrader Architecture
-
+```
 Market Data
     |
     v
@@ -30,6 +29,7 @@ Execute Order (Alpaca)
     |
     v
 Decision Journal (Supabase)
+```
 
 
 ## Key Features
@@ -58,6 +58,7 @@ Decision Journal (Supabase)
 
 ## Project Structure
 
+```
 dashboard/
   app.py
 
@@ -83,6 +84,7 @@ signals/
 
 config/
   settings.py
+```
 
 
 ## Dashboard Sections
@@ -116,22 +118,33 @@ config/
 ## Running Locally
 
 Clone the repository:
+```
 git clone https://github.com/iiTzThoha/UniTrader-Alpaca.git
 cd UniTrader-Alpaca
+```
 
 Create virtual environment:
+```
 python -m venv venv
 source venv/bin/activate
+```
 
 Install dependencies:
+```
 pip install -r requirements.txt
+```
 
 Set up environment variables:
+```
 cp .env.example .env
-Edit .env with your credentials
+```
+
+Edit .env with your credentials.
 
 Run the dashboard:
+```
 streamlit run dashboard/app.py
+```
 
 
 ## Author
