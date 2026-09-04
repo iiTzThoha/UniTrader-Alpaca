@@ -161,11 +161,6 @@ GitHub: iiTzThoha
 - Team: Solo
 
 
-## License
-
-MIT License
-
-
 ## Acknowledgments
 
 - Alpaca for the Trading API
