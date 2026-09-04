@@ -162,8 +162,20 @@ with right_col:
         import plotly.graph_objects as go
         import yfinance as yf
 
+        # Chart symbol input
+        chart_symbol_input = st.text_input(
+            "Chart Symbol",
+            value=st.session_state.get("chart_symbol", ""),
+            placeholder="e.g. AAPL, MSFT, NVDA",
+            key="chart_symbol_input_unique"
+        )
+        if chart_symbol_input:
+            symbol_upper = chart_symbol_input.strip().upper()
+            if symbol_upper:
+                st.session_state["chart_symbol"] = symbol_upper
+
         # Get symbol and timeframe from session state
-        chart_symbol = st.session_state.get("chart_symbol", "AAPL")
+        chart_symbol = st.session_state.get("chart_symbol", "")
         chart_period = st.session_state.get("chart_period", "Today")
         
         # Map period to yfinance format
@@ -180,8 +192,12 @@ with right_col:
         yf_period = period_map.get(chart_period, "1d")
         yf_interval = interval_map.get(yf_period, "5m")
         
-        ticker = yf.Ticker(chart_symbol)
-        hist = ticker.history(period=yf_period, interval=yf_interval)
+        # Only fetch data if symbol is provided
+        if chart_symbol:
+            ticker = yf.Ticker(chart_symbol)
+            hist = ticker.history(period=yf_period, interval=yf_interval)
+        else:
+            hist = None
 
         # Timeframe selector buttons
         col_a, col_b, col_c = st.columns(3)
@@ -198,20 +214,9 @@ with right_col:
                 st.session_state["chart_period"] = "Month"
                 st.rerun()
 
-        # Chart symbol input - separate from scan
-        chart_symbol_input = st.text_input(
-            "Chart Symbol",
-            value=chart_symbol,
-            placeholder="e.g. AAPL, MSFT, NVDA",
-            key="chart_symbol_input"
-        )
-        if chart_symbol_input:
-            symbol_upper = chart_symbol_input.strip().upper()
-            if symbol_upper != chart_symbol:
-                st.session_state["chart_symbol"] = symbol_upper
-                st.rerun()
 
-        if not hist.empty:
+
+        if chart_symbol and not hist.empty:
             st.markdown(f'<p style="color: #8B949E; font-size: 14px; margin-bottom: 4px;">{chart_symbol} - {chart_period}</p>', unsafe_allow_html=True)
             
             fig = go.Figure()
@@ -240,6 +245,8 @@ with right_col:
             change = ((latest / first - 1) * 100)
             color = "#22C55E" if change >= 0 else "#EF4444"
             st.markdown(f'<span style="font-size:20px; font-weight:600; color:#F0F6FC;">${latest:.2f}</span> <span style="color:{color};">{change:+.2f}%</span>', unsafe_allow_html=True)
+        elif not chart_symbol:
+            st.info("Enter a symbol above to view chart")
         else:
             st.info(f"No data for {chart_symbol}")
     except Exception as e:
