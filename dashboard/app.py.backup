@@ -1,0 +1,740 @@
+"""
+Day 5 — Dashboard.
+
+Streamlit app that surfaces the four core tables (proposals, wishlist,
+trades, circuit_breaker_events) and gives a human a real review action
+for proposals stuck in 'pending_review'/'flag' status — the gap that
+Day 4's auto-wishlist-routing was always a stopgap for.
+
+Run with:
+    streamlit run dashboard/app.py
+
+This must be run from the project root (or with the project root on
+PYTHONPATH) so the `core`, `agents`, `execution`, `persistence` imports
+resolve the same way the rest of the codebase does.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Allow running as `streamlit run dashboard/app.py` from repo root without
+# needing PYTHONPATH set manually.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from datetime import datetime, timezone
+
+import pandas as pd
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+
+from config.settings import settings
+from core.circuit_breaker import check_pre_scan, clear_manual_halt, trigger_manual_halt
+from core.journal import get_recent_stories, build_markdown_report
+from execution.executor import execute_proposal
+from execution.closer import close_position
+from execution.close_evaluator import run_exit_check
+from persistence.supabase_client import get_client
+from signals.universe import build_watchlist
+
+st.set_page_config(page_title="Alpaca Options Bot", layout="wide", page_icon="📈")
+auto_refresh_on = st.sidebar.checkbox("Auto-refresh (5s)", value=False, key="auto_refresh_toggle")
+if auto_refresh_on:
+    st_autorefresh(interval=5000, key="dashboard_autorefresh")
+
+# ---------------------------------------------------------------------
+# Shared visual styling — badges, cards, monospace numerics.
+# Kept in one block so every section below can reuse the same classes
+# instead of repeating inline HTML/CSS.
+# ---------------------------------------------------------------------
+st.markdown("""
+<style>
+/* Tabular/monospace numerals for anything money- or ratio-like */
+.mono-num {
+    font-family: "SF Mono", "Roboto Mono", Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Status badges */
+.badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+.badge-green  { background: rgba(63, 185, 80, 0.15);  color: #3FB950; border: 1px solid rgba(63, 185, 80, 0.35); }
+.badge-red    { background: rgba(248, 81, 73, 0.15);  color: #F85149; border: 1px solid rgba(248, 81, 73, 0.35); }
+.badge-yellow { background: rgba(210, 153, 34, 0.15); color: #D29922; border: 1px solid rgba(210, 153, 34, 0.35); }
+.badge-grey   { background: rgba(139, 148, 158, 0.15);color: #8B949E; border: 1px solid rgba(139, 148, 158, 0.35); }
+.badge-blue   { background: rgba(168, 85, 247, 0.15); color: #A855F7; border: 1px solid rgba(168, 85, 247, 0.35); }
+
+/* Section header row — small caption above a card group */
+.section-eyebrow {
+    color: #8B949E;
+    font-size: 0.85rem;
+    margin-bottom: 2px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------
+# Data loaders (cached briefly so repeated widget interactions on the
+# same page load don't re-hit Supabase for every button render)
+# ---------------------------------------------------------------------
+
+@st.cache_data(ttl=5)
+def load_table(name: str, order_col: str = "created_at", limit: int = 200) -> pd.DataFrame:
+    client = get_client()
+    result = (
+        client.table(name)
+        .select("*")
+        .order(order_col, desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return pd.DataFrame(result.data)
+
+
+def get_account_snapshot():
+    """Live Alpaca account numbers for the top-of-page header. Not cached —
+    this is cheap and should always be fresh."""
+    from core.alpaca_client import get_trading_client
+
+    client = get_trading_client()
+    account = client.get_account()
+    positions = client.get_all_positions()
+    return account, positions
+
+
+def refresh_all():
+    load_table.clear()
+    st.rerun()
+
+
+# ---------------------------------------------------------------------
+# Header: account snapshot + circuit breaker status + kill switch
+# ---------------------------------------------------------------------
+
+st.title("Options Trading Agent")
+st.caption("Live paper-trading dashboard")
+
+with st.container(border=True):
+    try:
+        account, positions = get_account_snapshot()
+        equity = float(account.equity)
+        last_equity = float(account.last_equity)
+        daily_pnl = equity - last_equity
+        daily_pnl_pct = (daily_pnl / last_equity * 100) if last_equity else 0.0
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Account Equity", f"${equity:,.2f}", f"{daily_pnl:+,.2f} ({daily_pnl_pct:+.2f}%)")
+        col2.metric("Open Positions", len(positions))
+        col3.metric("Execution Mode", settings.execution_mode.value.upper())
+        col4.metric("Strategy Mode", "Options" if "options" in settings.active_mode else "Equity")
+    except Exception as e:
+        st.error(f"Could not fetch live account data from Alpaca: {e}")
+
+st.divider()
+
+with st.container(border=True):
+    st.subheader("Safety Controls")
+    cb_col1, cb_col2, cb_col3 = st.columns([2, 1, 1])
+
+    with cb_col1:
+        st.markdown("**Circuit Breaker**")
+        st.caption("Checks account equity, daily loss, and open positions against safety limits.")
+        if st.button("Check current status"):
+            with st.spinner("Checking account state..."):
+                result = check_pre_scan()
+            if result.tripped:
+                reasons = ", ".join(r.value.replace("_", " ") for r in result.reasons)
+                st.markdown(f'<span class="badge badge-red">TRIPPED</span> &nbsp; {reasons}', unsafe_allow_html=True)
+            else:
+                st.markdown('<span class="badge badge-green">OK — safe to trade</span>', unsafe_allow_html=True)
+
+    with cb_col2:
+        st.markdown("**Kill Switch**")
+        st.caption("Manually stop all trading.")
+        if st.button("🛑 Halt trading", type="secondary"):
+            trigger_manual_halt(notes="Triggered from dashboard")
+            st.warning("Trading halted. No scans or orders will run until cleared.")
+            refresh_all()
+
+    with cb_col3:
+        st.markdown("**&nbsp;**", unsafe_allow_html=True)
+        st.caption("&nbsp;", unsafe_allow_html=True)
+        if st.button("✅ Resume trading", type="secondary"):
+            clear_manual_halt(notes="Cleared from dashboard")
+            st.success("Halt cleared.")
+            refresh_all()
+
+st.divider()
+
+with st.container(border=True):
+    st.subheader("Scan for Trade Ideas")
+    st.caption(
+        "Analyzes each symbol below and generates a trade proposal if the signals "
+        "support one. Checks the circuit breaker first and won't run if trading is halted."
+    )
+
+    scan_col1, scan_col2 = st.columns([3, 1])
+    with scan_col1:
+        scan_symbols_input = st.text_input(
+            "Symbols (comma-separated, leave blank for one small test run)",
+            value="",
+            placeholder="e.g. AAPL, MSFT, TSLA",
+            help="Leave blank to test with AAPL. Check "
+                 "'Use full watchlist' to scan every eligible symbol.",
+        )
+    with scan_col2:
+        use_full_watchlist = st.checkbox("Use full watchlist instead", value=False)
+
+    if use_full_watchlist:
+        st.warning(
+            f"Execution mode is **{settings.execution_mode.value.upper()}**. "
+            + (
+                "Full-watchlist scans in AUTO mode can place REAL orders for every "
+                "approved proposal, with no per-trade confirmation."
+                if settings.execution_mode.value == "auto"
+                else "Proposals will be generated but nothing executes automatically in MANUAL mode."
+            )
+        )
+        confirm_full_scan = st.checkbox("I understand and want to scan the full watchlist", key="confirm_full_scan")
+    else:
+        confirm_full_scan = True  # not needed for an explicit small symbol list
+
+    if st.button(
+        "▶️ Run scan now",
+        disabled=use_full_watchlist and not confirm_full_scan,
+        type="primary",
+    ):
+        if use_full_watchlist:
+            symbols_to_scan = build_watchlist()
+            scan_label = "full watchlist"
+        else:
+            symbols_to_scan = [s.strip().upper() for s in scan_symbols_input.split(",") if s.strip()]
+            if not symbols_to_scan:
+                symbols_to_scan = ["AAPL"]
+            scan_label = ", ".join(symbols_to_scan)
+
+        breaker_result = check_pre_scan()
+        if breaker_result.tripped:
+            st.error(
+                f"Trading is halted — scan skipped. "
+                f"Reasons: {[r.value.replace('_', ' ') for r in breaker_result.reasons]}"
+            )
+        else:
+            st.session_state.last_scan_outcomes = []
+            progress = st.progress(0.0, text=f"Scanning {scan_label}...")
+
+            from agents.orchestrator import run_pipeline
+
+            for i, symbol in enumerate(symbols_to_scan):
+                progress.progress((i) / len(symbols_to_scan), text=f"Scanning {symbol}...")
+                try:
+                    result = run_pipeline(symbol)
+                    if result is None:
+                        st.session_state.last_scan_outcomes.append(
+                            (symbol, "declined", "No clear trade setup found.")
+                        )
+                    else:
+                        verdict = result.get("critic_verdict", "?")
+                        status = result.get("status", "?")
+                        st.session_state.last_scan_outcomes.append(
+                            (symbol, "proposal", f"verdict: {verdict}, status: {status}")
+                        )
+                except Exception as e:
+                    st.session_state.last_scan_outcomes.append(
+                        (symbol, "error", f"{type(e).__name__}: {e}")
+                    )
+
+            progress.progress(1.0, text="Scan complete.")
+
+        if "last_scan_outcomes" in st.session_state and st.session_state.last_scan_outcomes:
+            n_proposals = sum(1 for _, kind, _ in st.session_state.last_scan_outcomes if kind == "proposal")
+            n_declined = sum(1 for _, kind, _ in st.session_state.last_scan_outcomes if kind == "declined")
+            n_errors = sum(1 for _, kind, _ in st.session_state.last_scan_outcomes if kind == "error")
+            st.success(
+                f"Scan complete: {len(st.session_state.last_scan_outcomes)} symbol(s) scanned — "
+                f"{n_proposals} proposal(s) generated, {n_declined} declined, "
+                f"{n_errors} error(s)."
+            )
+            for symbol, kind, detail in st.session_state.last_scan_outcomes:
+                icon = {"proposal": "✅", "declined": "⚪", "error": "🔴"}[kind]
+                st.write(f"{icon} **{symbol}** — {detail}")
+            # Deliberately NOT calling refresh_all() here — that would rerun the
+            # script and wipe this exact summary before you can read it. Click
+            # into the Review Queue / All Proposals tabs to see the new rows,
+            # or use the manual "Force refresh" button at the bottom of the page.
+
+st.divider()
+
+# ---------------------------------------------------------------------
+# Exit check panel — calls execution.close_evaluator.run_exit_check()
+# to evaluate every open proposal's COMBINED P&L (summed across legs,
+# not per-leg) against the standard +50% take-profit / -50% stop-loss
+# convention, and auto-closes any that have crossed a threshold.
+# ---------------------------------------------------------------------
+with st.container(border=True):
+    st.subheader("Check Exits")
+    st.caption(
+        "Evaluates every open position's combined profit/loss against the "
+        "+50% take-profit / -50% stop-loss rule. Multi-leg trades are evaluated as "
+        "one combined position. Will close any position that has crossed a threshold."
+    )
+    if st.button("🔍 Check exits now", type="primary"):
+        with st.spinner("Evaluating open positions..."):
+            evaluations = run_exit_check()
+        if not evaluations:
+            st.info("No open positions to evaluate.")
+        else:
+            for ev in evaluations:
+                pct_str = f"{ev.combined_pct:+.1%}" if ev.combined_pct is not None else "N/A"
+                label = ", ".join(ev.symbols)
+                if ev.trigger is None:
+                    st.write(f"**{label}** — ${ev.combined_unrealized_pnl:,.2f} ({pct_str}) — no trigger")
+                elif ev.closed:
+                    st.success(f"**{label}** — {ev.trigger} hit at {pct_str} — closed. " + " | ".join(ev.close_messages))
+                else:
+                    st.error(f"**{label}** — {ev.trigger} hit at {pct_str} — close FAILED or blocked. " + " | ".join(ev.close_messages))
+            load_table.clear()
+
+st.divider()
+tab_review, tab_proposals, tab_trades, tab_breaker_log, tab_journal = st.tabs(
+    ["🔍 Review Queue", "📋 All Proposals", "💰 Trades", "🚨 Breaker Log", "🧠 Decision Journal"]
+)
+
+
+# ---------------------------------------------------------------------
+# Tab 1: Review Queue — the actual gap this dashboard exists to close.
+# Shows proposals with status pending_review, plus flag-verdict rows,
+# with real Approve / Reject actions.
+# ---------------------------------------------------------------------
+
+def _bulk_reject(proposal_ids: list[str], reason: str) -> tuple[int, int]:
+    """Rejects a batch of proposals. Returns (success_count, fail_count)."""
+    client = get_client()
+    ok, fail = 0, 0
+    for pid in proposal_ids:
+        try:
+            client.table("proposals").update(
+                {
+                    "status": "rejected",
+                    "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                    "reviewed_by": "human",
+                }
+            ).eq("id", pid).execute()
+            client.table("reviews_rejections").insert(
+                {
+                    "proposal_id": pid,
+                    "reviewer_type": "human",
+                    "decision": "reject",
+                    "reason": reason,
+                    "rejection_category": "other",
+                }
+            ).execute()
+            ok += 1
+        except Exception:
+            fail += 1
+    return ok, fail
+
+
+def _bulk_approve_and_execute(proposal_ids: list[str]) -> list[tuple[str, bool, str]]:
+    """Approves and executes a batch of proposals one at a time (never in
+    parallel — each execute_proposal() call re-checks the circuit breaker,
+    and account state can change between orders). Returns a list of
+    (proposal_id, success, message) tuples for the summary."""
+    client = get_client()
+    results: list[tuple[str, bool, str]] = []
+
+    for pid in proposal_ids:
+        client.table("proposals").update(
+            {
+                "status": "approved",
+                "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                "reviewed_by": "human",
+            }
+        ).eq("id", pid).execute()
+        client.table("reviews_rejections").insert(
+            {
+                "proposal_id": pid,
+                "reviewer_type": "human",
+                "decision": "approve",
+                "reason": "Approved via dashboard bulk action",
+            }
+        ).execute()
+
+        fresh = client.table("proposals").select("*").eq("id", pid).single().execute()
+        exec_result = execute_proposal(fresh.data)
+        results.append((pid, exec_result.success, exec_result.message))
+
+        # If the circuit breaker trips mid-batch (e.g. a big loss from an
+        # earlier order in this same batch), stop immediately rather than
+        # keep firing orders into a now-unsafe account state.
+        if not exec_result.success and "circuit breaker" in exec_result.message.lower():
+            break
+
+    return results
+
+
+with tab_review:
+    st.caption(
+        "Proposals awaiting a human decision. Approving here sets status to "
+        "'approved' and immediately calls execute_proposal() — this places a "
+        "REAL paper order via Alpaca."
+    )
+
+    proposals_df = load_table("proposals", limit=300)
+
+    if proposals_df.empty:
+        st.info("No proposals found yet.")
+    else:
+        review_df = proposals_df[
+            proposals_df["status"].isin(["pending_review", "wishlisted"])
+            | (proposals_df["critic_verdict"] == "flag")
+        ].copy()
+        # Don't show ones already executed/rejected even if verdict was flag
+        review_df = review_df[~review_df["status"].isin(["executed", "rejected", "expired"])]
+
+        if review_df.empty:
+            st.success("Review queue is empty — nothing waiting on a human decision.")
+        else:
+            st.write(f"**{len(review_df)} proposal(s)** waiting for review")
+
+            # --- Bulk selection controls ---
+            if "selected_proposal_ids" not in st.session_state:
+                st.session_state.selected_proposal_ids = set()
+
+            sel_col1, sel_col2, sel_col3 = st.columns([1, 1, 2])
+            with sel_col1:
+                if st.button("Select all shown"):
+                    for pid in review_df["id"].tolist():
+                        st.session_state[f"chk_{pid}"] = True
+                    st.rerun()
+            with sel_col2:
+                if st.button("Clear selection"):
+                    for pid in review_df["id"].tolist():
+                        st.session_state[f"chk_{pid}"] = False
+                    st.rerun()
+
+            st.session_state.selected_proposal_ids = {
+                pid for pid in review_df["id"].tolist()
+                if st.session_state.get(f"chk_{pid}", False)
+            }
+            n_selected = len(st.session_state.selected_proposal_ids)
+            with sel_col3:
+                st.write(f"**{n_selected} selected**")
+
+            bulk_col1, bulk_col2 = st.columns(2)
+            with bulk_col1:
+                bulk_reject_reason = st.text_input(
+                    "Bulk rejection reason", value="Stale — pre-dates contract lookup fix",
+                    key="bulk_reject_reason",
+                )
+                if st.button(
+                    f"❌ Reject selected ({n_selected})",
+                    disabled=n_selected == 0,
+                    type="secondary",
+                ):
+                    ids = list(st.session_state.selected_proposal_ids)
+                    with st.spinner(f"Rejecting {len(ids)} proposal(s)..."):
+                        ok, fail = _bulk_reject(ids, bulk_reject_reason)
+                    st.warning(f"Rejected {ok} proposal(s)." + (f" {fail} failed." if fail else ""))
+                    for pid in ids:
+                        st.session_state[f"chk_{pid}"] = False
+                    st.session_state.selected_proposal_ids = set()
+                    refresh_all()
+
+            with bulk_col2:
+                st.write("")
+                confirm_bulk_approve = st.checkbox(
+                    f"I understand this places {n_selected} REAL paper order(s)",
+                    key="confirm_bulk_approve",
+                    disabled=n_selected == 0,
+                )
+                if st.button(
+                    f"✅ Approve & Execute selected ({n_selected})",
+                    disabled=n_selected == 0 or not confirm_bulk_approve,
+                    type="primary",
+                ):
+                    ids = list(st.session_state.selected_proposal_ids)
+                    with st.spinner(f"Executing {len(ids)} proposal(s), one at a time..."):
+                        results = _bulk_approve_and_execute(ids)
+                    for pid, success, message in results:
+                        if success:
+                            st.success(f"{pid[:8]}… — {message}")
+                        else:
+                            st.error(f"{pid[:8]}… — {message}")
+                    for pid in ids:
+                        st.session_state[f"chk_{pid}"] = False
+                    st.session_state.selected_proposal_ids = set()
+                    refresh_all()
+
+            st.divider()
+
+            for _, row in review_df.iterrows():
+                verdict = row.get("critic_verdict") or "—"
+                risk = row.get("critic_risk_score")
+                risk_str = f"{risk:.2f}" if risk is not None else "—"
+
+                st.checkbox(
+                    f"Select — {row['symbol']} ({row['strategy_type']}, {verdict}, risk {risk_str})",
+                    key=f"chk_{row['id']}",
+                )
+
+                with st.expander(
+                    f"Details — {row['symbol']} — {row['strategy_type']} — status: {row['status']}"
+                ):
+                    left, right = st.columns([2, 1])
+                    with left:
+                        st.markdown(f"**Proposer rationale:** {row.get('proposer_rationale') or '—'}")
+                        st.markdown(f"**Proposer confidence:** {row.get('proposer_confidence')}")
+                        st.markdown(f"**Critic rationale:** {row.get('critic_rationale') or '—'}")
+                        st.markdown(f"**Legs:**")
+                        st.json(row.get("proposed_contracts") or [])
+                    with right:
+                        st.markdown(f"**Created:** {row.get('created_at')}")
+                        st.markdown(f"**Timeframe:** {row.get('timeframe')}")
+                        st.markdown(f"**Execution mode at creation:** {row.get('execution_mode_at_creation')}")
+
+                    btn_col1, btn_col2 = st.columns(2)
+
+                    with btn_col1:
+                        if st.button(f"✅ Approve & Execute", key=f"approve_{row['id']}"):
+                            client = get_client()
+                            client.table("proposals").update(
+                                {
+                                    "status": "approved",
+                                    "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                                    "reviewed_by": "human",
+                                }
+                            ).eq("id", row["id"]).execute()
+                            client.table("reviews_rejections").insert(
+                                {
+                                    "proposal_id": row["id"],
+                                    "reviewer_type": "human",
+                                    "decision": "approve",
+                                    "reason": "Approved via dashboard review queue",
+                                }
+                            ).execute()
+
+                            # Re-fetch the row now that status=approved, so
+                            # execute_proposal's status guard passes.
+                            fresh = (
+                                client.table("proposals")
+                                .select("*")
+                                .eq("id", row["id"])
+                                .single()
+                                .execute()
+                            )
+                            with st.spinner("Submitting order(s) to Alpaca..."):
+                                exec_result = execute_proposal(fresh.data)
+
+                            if exec_result.success:
+                                st.success(exec_result.message)
+                            else:
+                                st.error(exec_result.message)
+                            refresh_all()
+
+                    with btn_col2:
+                        reject_reason = st.text_input(
+                            "Rejection reason (optional)", key=f"reason_{row['id']}"
+                        )
+                        if st.button(f"❌ Reject", key=f"reject_{row['id']}"):
+                            client = get_client()
+                            client.table("proposals").update(
+                                {
+                                    "status": "rejected",
+                                    "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                                    "reviewed_by": "human",
+                                }
+                            ).eq("id", row["id"]).execute()
+                            client.table("reviews_rejections").insert(
+                                {
+                                    "proposal_id": row["id"],
+                                    "reviewer_type": "human",
+                                    "decision": "reject",
+                                    "reason": reject_reason or "Rejected via dashboard review queue",
+                                    "rejection_category": "other",
+                                }
+                            ).execute()
+                            st.warning("Proposal rejected.")
+                            refresh_all()
+
+
+# ---------------------------------------------------------------------
+# Tab 2: All proposals (read-only browse/filter)
+# ---------------------------------------------------------------------
+
+with tab_proposals:
+    st.caption("Full proposal history across all statuses.")
+    proposals_df = load_table("proposals", limit=300)
+
+    if proposals_df.empty:
+        st.info("No proposals yet.")
+    else:
+        status_filter = st.multiselect(
+            "Filter by status",
+            options=sorted(proposals_df["status"].dropna().unique()),
+            default=[],
+        )
+        verdict_filter = st.multiselect(
+            "Filter by Critic verdict",
+            options=sorted(proposals_df["critic_verdict"].dropna().unique()),
+            default=[],
+        )
+
+        filtered = proposals_df
+        if status_filter:
+            filtered = filtered[filtered["status"].isin(status_filter)]
+        if verdict_filter:
+            filtered = filtered[filtered["critic_verdict"].isin(verdict_filter)]
+
+        display_cols = [
+            "created_at", "symbol", "strategy_type", "timeframe", "status",
+            "critic_verdict", "critic_risk_score", "proposer_confidence",
+        ]
+        display_cols = [c for c in display_cols if c in filtered.columns]
+        st.dataframe(filtered[display_cols], use_container_width=True, height=500)
+
+# ---------------------------------------------------------------------
+# Tab 4: Trades (the P&L view — this is what judges will care about most)
+# ---------------------------------------------------------------------
+
+with tab_trades:
+    st.caption("Executed orders. realized_pnl populates once positions are closed.")
+    trades_df = load_table("trades", limit=300)
+
+    if trades_df.empty:
+        st.info("No trades executed yet.")
+    else:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total trades", len(trades_df))
+        filled = trades_df[trades_df["status"].isin(["filled", "closed", "submitted"])]
+        m2.metric("Filled/closed", len(filled))
+        if "realized_pnl" in trades_df.columns:
+            total_pnl = trades_df["realized_pnl"].dropna().sum()
+            m3.metric("Total realized P&L", f"${total_pnl:,.2f}")
+
+        # Live position lookup by symbol, from the same Alpaca positions
+        # list already fetched for the header metrics.
+        _, live_positions = get_account_snapshot()
+        positions_by_symbol = {p.symbol: p for p in live_positions}
+
+        open_trades = trades_df[trades_df["status"] == "submitted"]
+        m4.metric("Open (unclosed)", len(open_trades))
+
+        if not open_trades.empty:
+            st.subheader("Open Positions — Live P&L")
+            for _, row in open_trades.iterrows():
+                pos = positions_by_symbol.get(row["symbol"])
+                cols = st.columns([2, 1, 1, 1, 1, 1])
+                cols[0].write(f"**{row['symbol']}**")
+                cols[1].write(f"{row['side']} x{row['quantity']}")
+                if pos is not None:
+                    unrealized_pl = float(pos.unrealized_pl)
+                    unrealized_pct = float(pos.unrealized_plpc) * 100
+                    cols[2].write(f"${float(pos.market_value):,.2f}")
+                    pnl_color = "🟢" if unrealized_pl >= 0 else "🔴"
+                    cols[3].write(f"{pnl_color} ${unrealized_pl:,.2f}")
+                    cols[4].write(f"{unrealized_pct:+.2f}%")
+                else:
+                    cols[2].write("—")
+                    cols[3].write("no live position found")
+                    cols[4].write("—")
+
+                if cols[5].button("Close", key=f"close_{row['id']}"):
+                    st.session_state[f"confirm_close_{row['id']}"] = True
+
+                if st.session_state.get(f"confirm_close_{row['id']}"):
+                    st.warning(f"This will place a REAL paper order to close {row['symbol']}. Confirm?")
+                    cc1, cc2 = st.columns(2)
+                    if cc1.button("Yes, close it", key=f"confirm_yes_{row['id']}"):
+                        result = close_position(row.to_dict())
+                        if result.success:
+                            st.success(result.message)
+                        else:
+                            st.error(result.message)
+                        st.session_state[f"confirm_close_{row['id']}"] = False
+                        load_table.clear()
+                        st.rerun()
+                    if cc2.button("Cancel", key=f"confirm_no_{row['id']}"):
+                        st.session_state[f"confirm_close_{row['id']}"] = False
+                        st.rerun()
+            st.divider()
+
+        display_cols = [
+            "created_at", "symbol", "side", "quantity", "status",
+            "fill_price", "realized_pnl", "alpaca_order_id",
+        ]
+        display_cols = [c for c in display_cols if c in trades_df.columns]
+        st.dataframe(trades_df[display_cols], use_container_width=True, height=500)
+
+# ---------------------------------------------------------------------
+# Tab 5: Circuit breaker audit log
+# ---------------------------------------------------------------------
+
+with tab_breaker_log:
+    st.caption("Full audit trail of every pre_scan / pre_execution / manual check.")
+    breaker_df = load_table("circuit_breaker_events", limit=200)
+
+    if breaker_df.empty:
+        st.info("No circuit breaker events logged yet.")
+    else:
+        display_cols = [
+            "created_at", "check_point", "tripped", "reasons",
+            "equity", "daily_pnl_pct", "open_positions_count",
+            "trades_today_count", "cleared_by_human",
+        ]
+        display_cols = [c for c in display_cols if c in breaker_df.columns]
+        st.dataframe(breaker_df[display_cols], use_container_width=True, height=500)
+
+
+with tab_journal:
+    st.caption(
+        "Human-readable narrative of each trading decision: what the signal "
+        "showed, what the Proposer argued, how the independent Critic "
+        "evaluated it, and the final outcome."
+    )
+    journal_col1, journal_col2 = st.columns([3, 1])
+    with journal_col1:
+        journal_limit = st.slider("Number of recent decisions to show", 5, 50, 15)
+    with journal_col2:
+        st.write("")
+        st.write("")
+        if st.button("📄 Export full report (.md)"):
+            report_md = build_markdown_report(limit=journal_limit)
+            st.download_button(
+                "⬇️ Download Decision Journal.md",
+                data=report_md,
+                file_name="decision_journal.md",
+                mime="text/markdown",
+            )
+    stories = get_recent_stories(limit=journal_limit)
+    if not stories:
+        st.info("No proposals recorded yet — run a scan first.")
+    else:
+        symbol_options = [
+            f"{i+1}. {s['proposal'].get('symbol', '?')} — "
+            f"{s['proposal'].get('strategy_type', '?')} "
+            f"({s['proposal'].get('created_at', '')[:16]})"
+            for i, s in enumerate(stories)
+        ]
+        selected_idx = st.selectbox(
+            "Pick a decision to view in detail",
+            range(len(stories)),
+            format_func=lambda i: symbol_options[i],
+        )
+        st.markdown("---")
+        st.markdown(stories[selected_idx]["narrative"])
+
+st.divider()
+st.caption(f"Refreshed at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} · Data cached 15s")
+if st.button("🔄 Force refresh"):
+    refresh_all()

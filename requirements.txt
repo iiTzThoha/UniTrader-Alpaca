@@ -1,0 +1,22 @@
+# Core
+python-dotenv>=1.0.0
+
+# Alpaca
+alpaca-py>=0.33.0
+
+# Supabase
+supabase>=2.9.0
+
+# Signals / data
+yfinance>=0.2.40
+pandas>=2.2.0
+numpy>=1.26.0
+
+# LLM provider: AI/ML API (OpenAI-compatible endpoint, one SDK covers it)
+openai>=1.55.0
+
+# Dashboard (placeholder - finalize choice on Day 5)
+# streamlit>=1.40.0
+
+# Dev / testing
+pytest>=8.0.0
