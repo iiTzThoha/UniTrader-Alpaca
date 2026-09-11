@@ -87,9 +87,6 @@ def evaluate(
         if snapshot.daily_pnl_absolute <= -abs(cfg.max_daily_loss_absolute):
             reasons.append(TripReason.DAILY_LOSS_ABSOLUTE)
 
-    if snapshot.open_positions_count >= cfg.max_open_positions:
-        reasons.append(TripReason.MAX_OPEN_POSITIONS)
-
     if snapshot.trades_today_count >= cfg.max_trades_per_day:
         reasons.append(TripReason.MAX_TRADES_PER_DAY)
 
