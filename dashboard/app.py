@@ -388,21 +388,9 @@ st.divider()
 # =========================================================================
 # TABS
 # =========================================================================
-_TAB_LABELS = ["Review Queue", "All Proposals", "Trades", "Breaker Log", "Decision Journal"]
-if "active_tab" not in st.session_state:
-    st.session_state.active_tab = _TAB_LABELS[0]
-
-st.session_state.active_tab = st.radio(
-    "Tabs", _TAB_LABELS, index=_TAB_LABELS.index(st.session_state.active_tab),
-    horizontal=True, label_visibility="collapsed", key="tab_selector",
+tab_review, tab_proposals, tab_trades, tab_breaker_log, tab_journal = st.tabs(
+    ["Review Queue", "All Proposals", "Trades", "Breaker Log", "Decision Journal"]
 )
-
-from contextlib import nullcontext
-tab_review = st.container() if st.session_state.active_tab == "Review Queue" else nullcontext()
-tab_proposals = st.container() if st.session_state.active_tab == "All Proposals" else nullcontext()
-tab_trades = st.container() if st.session_state.active_tab == "Trades" else nullcontext()
-tab_breaker_log = st.container() if st.session_state.active_tab == "Breaker Log" else nullcontext()
-tab_journal = st.container() if st.session_state.active_tab == "Decision Journal" else nullcontext()
 
 # ---------------------------------------------------------------------
 # REVIEW QUEUE
