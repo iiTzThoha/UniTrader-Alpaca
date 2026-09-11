@@ -147,12 +147,15 @@ with left_col:
         last_equity = float(account.last_equity) if hasattr(account, 'last_equity') and account.last_equity else equity
         daily_pnl = equity - last_equity
         daily_pnl_pct = (daily_pnl / last_equity * 100) if last_equity else 0.0
-        total_pnl = equity - 100000
-        total_pnl_pct = (total_pnl / 100000 * 100) if total_pnl else 0.0
+        trades_df_header = load_table("trades", limit=300)
+        if not trades_df_header.empty and "realized_pnl" in trades_df_header.columns:
+            total_realized_pnl = trades_df_header["realized_pnl"].dropna().sum()
+        else:
+            total_realized_pnl = 0.0
 
         st.metric("Portfolio Value", f"${equity:,.2f}", f"{daily_pnl:+,.2f} ({daily_pnl_pct:+.2f}%)")
         st.metric("Daily P&L", f"{daily_pnl:+,.2f}", f"{daily_pnl_pct:+.2f}% Today")
-        st.metric("Total Return", f"{total_pnl:+,.2f}", f"{total_pnl_pct:+.2f}% Return")
+        st.metric("Total realized P&L", f"${total_realized_pnl:,.2f}")
         st.metric("Buying Power", f"${buying_power:,.2f}", f"{len(positions)} Open Positions")
     except Exception as e:
         st.error(f"Could not fetch live account data: {e}")
@@ -385,9 +388,21 @@ st.divider()
 # =========================================================================
 # TABS
 # =========================================================================
-tab_review, tab_proposals, tab_trades, tab_breaker_log, tab_journal = st.tabs(
-    ["Review Queue", "All Proposals", "Trades", "Breaker Log", "Decision Journal"]
+_TAB_LABELS = ["Review Queue", "All Proposals", "Trades", "Breaker Log", "Decision Journal"]
+if "active_tab" not in st.session_state:
+    st.session_state.active_tab = _TAB_LABELS[0]
+
+st.session_state.active_tab = st.radio(
+    "Tabs", _TAB_LABELS, index=_TAB_LABELS.index(st.session_state.active_tab),
+    horizontal=True, label_visibility="collapsed", key="tab_selector",
 )
+
+from contextlib import nullcontext
+tab_review = st.container() if st.session_state.active_tab == "Review Queue" else nullcontext()
+tab_proposals = st.container() if st.session_state.active_tab == "All Proposals" else nullcontext()
+tab_trades = st.container() if st.session_state.active_tab == "Trades" else nullcontext()
+tab_breaker_log = st.container() if st.session_state.active_tab == "Breaker Log" else nullcontext()
+tab_journal = st.container() if st.session_state.active_tab == "Decision Journal" else nullcontext()
 
 # ---------------------------------------------------------------------
 # REVIEW QUEUE
