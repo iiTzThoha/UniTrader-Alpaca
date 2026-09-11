@@ -37,7 +37,7 @@ class UniverseSymbol:
     fractionable: bool
 
 
-def fetch_options_enabled_assets(limit: int = 200) -> list[UniverseSymbol]:
+def fetch_options_enabled_assets(limit: int = 100) -> list[UniverseSymbol]:
     """Queries Alpaca for US equities that are tradable and have
     options contracts enabled. Returns up to `limit` results, biased
     toward the preferred liquid seed list first (if present in results),
@@ -75,7 +75,7 @@ def fetch_options_enabled_assets(limit: int = 200) -> list[UniverseSymbol]:
     return candidates[:limit]
 
 
-def build_watchlist(max_symbols: int = 30) -> list[str]:
+def build_watchlist(max_symbols: int = 100) -> list[str]:
     """Returns a plain list of ticker strings ready for the signal engine
     to scan. This is the main entrypoint other modules should call."""
     assets = fetch_options_enabled_assets(limit=max_symbols)
@@ -85,6 +85,6 @@ def build_watchlist(max_symbols: int = 30) -> list[str]:
 if __name__ == "__main__":
     # Smoke test: `python -m signals.universe`
     # Requires real Alpaca credentials in .env
-    watchlist = build_watchlist(max_symbols=30)
+    watchlist = build_watchlist(max_symbols=100)
     print(f"Built watchlist of {len(watchlist)} symbols:")
     print(watchlist)
